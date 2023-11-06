@@ -2,6 +2,7 @@ from csv import writer
 import socket
 import time
 import threading
+from urllib import response
 import urllib.parse
 import requests
 import json
@@ -11,11 +12,12 @@ import csv
 BASE_URL = "http://127.0.0.1:5000"
 
 HOST, PORT = '127.0.0.1', 5000
-NUM_REQUESTS = 1000  # Number of requests to send per client
+NUM_REQUESTS = 100  # Number of requests to send per client
 NUM_CLIENTS = 10     # Number of concurrent clients
 READ_PERCENTAGE = 0.95
 ALL_METHODS = False
 TEST_DISTRUBUTION = True
+TEST_ADD_OR_REMOVE = False
 
 def put_value(key, value):
     try:
@@ -50,7 +52,27 @@ def del_value(key):
             print("Failed to DELETE:", response.text)
     except Exception as e:
         print("Error occurred:", e)
+        
+def add_server():
+    try:
+        response = requests.post(BASE_URL + "/add_server")
+        if response.status_code == 200:
+            print("Adding server successful:", response.json())
+        else:
+            print("Adding server failed", response.text)
+    except Exception as e:
+        print("Error occurred:", e)
 
+def remove_server(port):
+    try:
+        response = requests.post(BASE_URL + "/remove_server", params={"port": port})
+        if response.status_code == 200:
+            print("Adding server successful:", response.json())
+        else:
+            print("Removing server failed", response.text)
+    except Exception as e:
+        print("Error occurred:", e)
+        
 LT_list = []
 filename = f"Latency_over_Throughput_with_{READ_PERCENTAGE}_read" if not ALL_METHODS else "Latency_over_Throughput_with_all_three_methods"
 
@@ -70,7 +92,9 @@ def client_thread(client_id):
     for i in range(NUM_REQUESTS):
         key = f"key-{client_id}-{i}"
         value = f"value-{client_id}-{i}"
+        port = "5001"
         
+
         if (ALL_METHODS):
             put_value(key, value)
             get_value(key)
@@ -78,25 +102,27 @@ def client_thread(client_id):
         elif (TEST_DISTRUBUTION):
             put_value(key, value)
             get_value(key)
-        else: 
+        elif (TEST_ADD_OR_REMOVE):
+            add_server()
+            remove_server(port)
+        else:
             if should_read():
                 get_value(key)
-                # read_count += 1
             else:
                 put_value(key, value)
-                # write_count += 1
     
     # End time
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    throughput = NUM_REQUESTS * number_of_methods / elapsed_time  
-    latency = elapsed_time / (NUM_REQUESTS * number_of_methods)
+    if (not TEST_ADD_OR_REMOVE):
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        throughput = NUM_REQUESTS * number_of_methods / elapsed_time  
+        latency = elapsed_time / (NUM_REQUESTS * number_of_methods)
 
-    print(f"Client-{client_id} | Throughput: {throughput:.2f} req/s | Average Latency: {latency:.6f} seconds")
-    LT = [f"{latency:.6f}", f"{throughput:.2f}"]
-    with open(filename, 'a') as file:
-        writer = csv.writer(file)
-        writer.writerow(LT)
+        print(f"Client-{client_id} | Throughput: {throughput:.2f} req/s | Average Latency: {latency:.6f} seconds")
+        LT = [f"{latency:.6f}", f"{throughput:.2f}"]
+        with open(filename, 'a') as file:
+            writer = csv.writer(file)
+            writer.writerow(LT)
     
 if __name__ == "__main__":
     clients = []

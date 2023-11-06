@@ -1,27 +1,15 @@
-from ast import main
-from email import message
-from platform import node
-from flask import Flask, request, jsonify, Response
+from flask import Flask, g, request, jsonify, Response
 from threading import Thread
 import json
 import time
 import logging
-import sys
 import requests
 import hashlib
 import bisect
 from multiprocessing import Process
+import os
+import signal
 
-# logging.basicConfig(filename='myServer.log',
-#                     level=logging.DEBUG,
-#                     format='%(message)s')
-
-# logger = logging.getLogger(__name__)
-# global app
-# app = Flask(__name__)
-
-# global initial_server_count
-# initial_server_count = 4
 class HashRing:
     def __init__(self, nodes=None, vnodes=100):
         self.vnodes = vnodes
@@ -39,18 +27,35 @@ class HashRing:
         return int(hashValue.hexdigest(), 16)
     
     def add_node(self, node):
+        if node not in self.nodes:
+            self.nodes.append(nodes)
+            
         for i in range(self.vnodes):
-            key = self._hash(f"{node}:{i}")
+            key = self._hash(f"{node}_{i}")
             self.ring[key] = node
             bisect.insort(self._sorted_keys, key)
     
     def remove_node(self, node):
-        for i in range(self.vnodes):
-            key = self._hash(f"{node}_{i}")
-            self.ring.pop(key)
-            index = bisect.bisect_left(self._sorted_keys, key)
-            del self._sorted_keys[index]
-    
+        try:
+            for i in range(self.vnodes):
+                key = self._hash(f"{node}_{i}")
+            
+                if key in self.ring:
+                    self.ring.pop(key)
+                
+                    
+                index = bisect.bisect_left(self._sorted_keys, key)
+                
+                if index < len(self._sorted_keys):
+                    if self._sorted_keys[index] == key:
+                        del self._sorted_keys[index]
+
+                else:
+                    del self._sorted_keys[0]
+           
+        except Exception as e:
+            print(f"An error occurred while removing the node {node}: {e}")
+        
     def get_node(self, key):
         if not self.ring:
             return None
@@ -63,16 +68,16 @@ class HashRing:
 class MyKVStore:
     def __init__(self, serverName, storageName, port):
         self.app = Flask(serverName)
-        self.logger = logging.getLogger(serverName)
+        # self.logger = logging.getLogger(serverName)
         self.serverName = serverName
         self.storage = storageName
         self.port = port
         self.server_kv_store = {}
         
         self.read_data_from_storage()
-        logging.basicConfig(filename=f'{serverName}.log',
-                    level=logging.DEBUG,
-                    format='%(message)s')
+        # logging.basicConfig(filename=f'{serverName}.log',
+        #             level=logging.DEBUG,
+        #             format='%(message)s')
         
     def read_data_from_storage(self):
         try:
@@ -107,15 +112,14 @@ class MyKVStore:
         for key, value in other_data.items():
             self.server_kv_store[key] = value
                     
-        print(f"Number of keys in {self.serverName} store before migration: {len(self.server_kv_store)}")
-        print(f"Number of keys in {other.serverName} store before migration: {len(other.server_kv_store)}")
+        print(f"Number of keys in {self.serverName} store after migration: {len(self.server_kv_store)}")
+        print(f"Number of keys in {other.serverName} store after migration: {len(other.server_kv_store)}")
         
         with open(self.storage, 'w') as file:
             json.dump(self.server_kv_store, file)
             print(f"Data saved to {self.storage}")
     
 
-    
     def routes(self):
         @self.app.route('/put', methods=['PUT'])
         def put_value():
@@ -144,11 +148,9 @@ class MyKVStore:
         
         @self.app.route('/shutdown', methods=['POST'])
         def shutdown():
-            shutdown_func = request.environ.get('werkzeug.server.shutdown')
-            if shutdown_func is None:
-                raise RuntimeError('Not running with the Werkzeug Server')
-            shutdown_func()
-            return 'Server shutting down...'
+            print("received a shutdown command")
+            os.kill(os.getpid(), signal.SIGINT)
+            return 'Server shutting down...', 200
         
         self.app.add_url_rule('/put', view_func=put_value, methods=['PUT'])
         self.app.add_url_rule('/get', view_func=get_value, methods=['GET'])
@@ -161,12 +163,12 @@ class MyKVStore:
    
   
 class MyDistributor: 
-    def __init__(self, ring, server_tracker, server_processes):
+    def __init__(self, ring, server_tracker, kv_stores):
         self.app = Flask(__name__)
         self.HashRing = ring
         self.added_servers = []
         self.server_tracker = server_tracker
-        self.server_processes = server_processes
+        self.kv_server_instances = kv_stores
 
     def routes(self):
         @self.app.route('/put', methods=['PUT'])
@@ -176,12 +178,9 @@ class MyDistributor:
             print("recevied a put request")
             node = self.HashRing.get_node(key)
             response = requests.put(f"http://127.0.0.1:{node}" + "/put", params={"key": key, "value": value})
-            # return response.json(), response.status_code
             try:
-                # Attempt to get JSON response if possible
                 response_data = response.json()
             except ValueError:
-                # If response is not in JSON format, return the raw response text or a custom message
                 response_data = {'error': 'Invalid JSON response', 'response_text': response.text}
             return jsonify(response_data), response.status_code
             
@@ -191,12 +190,9 @@ class MyDistributor:
             print("recevied a get request")
             node = self.HashRing.get_node(key)
             response = requests.get(f"http://127.0.0.1:{node}" + "/get", params={"key": key})
-            # return response.json(), response.status_code
             try:
-                # Attempt to get JSON response if possible
                 response_data = response.json()
             except ValueError:
-                # If response is not in JSON format, return the raw response text or a custom message
                 response_data = {'error': 'Invalid JSON response', 'response_text': response.text}
             return jsonify(response_data), response.status_code           
             
@@ -204,47 +200,65 @@ class MyDistributor:
         def del_value():
             key = request.args.get('key')
             print("recevied a del request")
-            
             node = self.HashRing.get_node(key)
             response = requests.request("DEL", f"http://127.0.0.1:{node}" + "/del", params={"key": key})
-            # return response.json(), response.status_code
             try:
-                # Attempt to get JSON response if possible
                 response_data = response.json()
             except ValueError:
-                # If response is not in JSON format, return the raw response text or a custom message
                 response_data = {'error': 'Invalid JSON response', 'response_text': response.text}
             return jsonify(response_data), response.status_code
                   
         @self.app.route('/add_server', methods=['POST'])
-        def add_server(self):
+        def add_server():
             new_server_node = f"500{self.server_tracker}"
             self.server_tracker += 1
             self.HashRing.add_node(new_server_node)
-            new_port = Process(target=start_server, args=(int(new_server_node),))
-            add_server.append(new_port)
-            new_port.start()
+            new_server = create_server(int(new_server_node))
+            new_server_process = Process(target=start_server, args=(new_server,))
+            self.added_servers.append(new_server_process)
+            new_server_process.start()
             return jsonify({'message': "new server added to port"}), 200
 
+
         @self.app.route('/remove_server', methods=['POST'])
-        def remove_server(self):
+        def remove_server():
             port = request.args.get('port')
-            server_to_remove = f"500{port}"
-            if (server_to_remove not in self.HashRing.ring):
-                return jsonify({'message': f"server at port{port} doesn't exist"}), 400
+            port = int(port) if port is not None else 0
+            server_to_remove = None
+            for kv_server in self.kv_server_instances:
+                if (int(kv_server.port) == int(port) if port is not None else False):
+                    server_to_remove = kv_server 
+                    break
             
-            self.HashRing.remove_node(server_to_remove)
-            removed_server = 
-            self.HashRing.remove_node(server_to_remove)
-            
+            print("test1")
+            if server_to_remove is None:
+                return jsonify({'message': f"something went wrong1, server at {port} doesn't exist"}), 400
             try:
-                response = requests.post(f"http://127.0.0.1:{server_to_remove}/shutdown")
+                self.HashRing.remove_node(str(port))
+                data_from_server =  server_to_remove.server_kv_store
+                example_key = next(iter(data_from_server))
+                print("example key =", example_key)
+                next_server_port = self.HashRing.get_node(example_key)
+                print("Next port =", next_server_port)
+                for kv_server in self.kv_server_instances:
+                    if (int(kv_server.port) == int(next_server_port)):
+                        next_server = kv_server 
+                        next_server.migrate_data_from_another_storage(server_to_remove)
+                        break
+            except Exception as e:
+                print(f"Error removing a server node: {e}")
+            
+            print("test2")
+            try:
+                response = requests.post(f"http://127.0.0.1:{port}/shutdown")
                 if response.status_code == 200:
-                    print(f"Server on port {server_to_remove} is shutting down.")
+                    print(f"Server on port {port} is shutting down.")
+                    return jsonify({'message': f"server at port {port} has been removed"}), 200
+                else:
+                    return jsonify({'message': f"something went wrong2"}), 400
             except requests.exceptions.RequestException as e:
                 print(f"Error shutting down server on port {server_to_remove}: {e}")
-                
-            return jsonify({'message': f"server at port{port} has been removed"}), 200
+                return jsonify({'message': f"something went wrong3"}), 400
                         
         self.app.add_url_rule('/put', view_func=put_value, methods=['PUT'])
         self.app.add_url_rule('/get', view_func=get_value, methods=['GET'])
@@ -260,34 +274,40 @@ class MyDistributor:
         for server in self.added_servers:
             server.join()
      
-nodes = [] 
-port_number_tracker = 1
-number_of_servers = 5
-while port_number_tracker <= number_of_servers:
-    nodes.append(f"500{port_number_tracker}")    
-    port_number_tracker += 1    
-ring = HashRing(nodes, vnodes=100)
-myDistributor = MyDistributor(ring, port_number_tracker)
 
-
-def start_server(port):
+def create_server(port):
     server_name = f'MyKVServer{port}'
     storage_name = f'storage{port}.json'
     kv_store = MyKVStore(server_name, storage_name, port)
+    return kv_store
+
+def start_server(kv_store):
     kv_store.routes()
     kv_store.run_server()
         
 
 if __name__ == '__main__':
-    servers = [
-        Process(target=start_server, args=(int(node),)) for node in nodes
+    nodes = [] 
+    port_number_tracker = 1
+    number_of_servers = 5
+    while port_number_tracker <= number_of_servers:
+        nodes.append(f"500{port_number_tracker}")    
+        port_number_tracker += 1    
+    ring = HashRing(nodes, vnodes=100)
+    
+    servers = [create_server(node) for node in nodes]
+    servers_process = [
+        Process(target=start_server, args=(server, )) for server in servers
     ]
-    servers.append(Process(target=myDistributor.run_server))
+        
+    myDistributor = MyDistributor(ring, port_number_tracker, servers)
+
+    servers_process.append(Process(target=myDistributor.run_server))
     
     # Start all servers
-    for server in servers:
+    for server in servers_process:
         server.start()
-        
+
     # Join all servers to the main thread to prevent the script from finishing prematurely
-    for server in servers:
+    for server in servers_process:
         server.join()
