@@ -10,7 +10,20 @@ from multiprocessing import Process
 import os
 import signal
 
+
 class HashRing:
+    """
+    A hash ring class that utilizes hashlib and bisect library 
+    (mp5 hash value, which create a key space of 2 ^ 126).
+    The initializor takes optional parameters, a list of physical nodes 
+    and a number of virtual nodes for each physical node.  
+    
+    Each physical node is repersented by a server's port number.
+    self.vnodes tracks the number virtual nodes each physical node has.
+    self.ring maps the vnodes to its corresponding physical node.
+    self._sorted_keys contains all keys from self.ring in a ascending order to
+    achieve the formation of a ring.  
+    """
     def __init__(self, nodes=None, vnodes=100):
         self.vnodes = vnodes
         self.ring = dict()
@@ -26,6 +39,7 @@ class HashRing:
         hashValue.update(key.encode('utf-8'))
         return int(hashValue.hexdigest(), 16)
     
+    # add a new node to nodes and generate its virtual nodes with the loop
     def add_node(self, node):
         if node not in self.nodes:
             self.nodes.append(nodes)
@@ -35,27 +49,27 @@ class HashRing:
             self.ring[key] = node
             bisect.insort(self._sorted_keys, key)
     
+    # remove a node from nodes and its corresponding virtual nodes from sorted key list
     def remove_node(self, node):
+        # try/except block is used for testing
         try:
             for i in range(self.vnodes):
                 key = self._hash(f"{node}_{i}")
             
                 if key in self.ring:
                     self.ring.pop(key)
-                
                     
                 index = bisect.bisect_left(self._sorted_keys, key)
                 
                 if index < len(self._sorted_keys):
                     if self._sorted_keys[index] == key:
                         del self._sorted_keys[index]
-
                 else:
                     del self._sorted_keys[0]
-           
         except Exception as e:
             print(f"An error occurred while removing the node {node}: {e}")
         
+    # map a key on the ring and get the closest server node to the right (higher hash value)
     def get_node(self, key):
         if not self.ring:
             return None
@@ -66,19 +80,31 @@ class HashRing:
 
 
 class MyKVStore:
+    """
+    A Key Value Store server class based on hwk1 code utilizing Flask.
+    Each MyKVStore instance has its local (dictionary) and disk (.json file) key-value store 
+    
+    self.app: an instance of Flask server
+    self.serverName: the name of this KVStore server
+    self.storage: the name of its disk storage
+    self.port: the port number where the server is deploy at
+    self.server_kv_store: its local storage 
+    """
     def __init__(self, serverName, storageName, port):
         self.app = Flask(serverName)
-        # self.logger = logging.getLogger(serverName)
         self.serverName = serverName
         self.storage = storageName
         self.port = port
         self.server_kv_store = {}
         
         self.read_data_from_storage()
+        
+        # self.logger = logging.getLogger(serverName)
         # logging.basicConfig(filename=f'{serverName}.log',
         #             level=logging.DEBUG,
         #             format='%(message)s')
-        
+    
+    # same I/O functions from Hwk1. Occationally saving data to disk in a seperate thread
     def read_data_from_storage(self):
         try:
             with open(self.storage, 'r') as file:
@@ -100,10 +126,13 @@ class MyKVStore:
             except Exception as e:
                 print(f"An error occurred: {e}")
         
+    # Handling data migration after a server is being shutdown
+    # Being used to simulate adding/removing server nodes in hash ring
     def migrate_data_from_another_storage(self, other):
         print(f"Number of keys in {self.serverName} store before migration: {len(self.server_kv_store)}")
         print(f"Number of keys in {other.serverName} store before migration: {len(other.server_kv_store)}")
         
+        # instant save to improve fault tolerance
         with open(self.storage, 'w') as file:
             json.dump(self.server_kv_store, file)
             print(f"Data saved to {self.storage}")
@@ -115,11 +144,12 @@ class MyKVStore:
         print(f"Number of keys in {self.serverName} store after migration: {len(self.server_kv_store)}")
         print(f"Number of keys in {other.serverName} store after migration: {len(other.server_kv_store)}")
         
+        # instant update to the disk
         with open(self.storage, 'w') as file:
             json.dump(self.server_kv_store, file)
             print(f"Data saved to {self.storage}")
     
-
+    # all routing methods
     def routes(self):
         @self.app.route('/put', methods=['PUT'])
         def put_value():
@@ -146,6 +176,7 @@ class MyKVStore:
             else:
                 return jsonify({'error': 'Key not found'}), 404
         
+        # special shutdown route to simulate a server going down, using os.kill to kill the process
         @self.app.route('/shutdown', methods=['POST'])
         def shutdown():
             print("received a shutdown command")
@@ -154,15 +185,21 @@ class MyKVStore:
         
         self.app.add_url_rule('/put', view_func=put_value, methods=['PUT'])
         self.app.add_url_rule('/get', view_func=get_value, methods=['GET'])
-        self.app.add_url_rule('/del', view_func=del_value, methods=['DELETE'])
+        self.app.add_url_rule('/del', view_func=del_value, methods=['DEL'])
         self.app.add_url_rule('/shutdown', view_func=shutdown, methods=['POST'])
     
+    # run KVStore server on its port with forever running disk saving thread
     def run_server(self):
         Thread(target=self.save_data_to_file, daemon=True).start()
         self.app.run(threaded=True, host='127.0.0.1', port=self.port)
    
   
-class MyDistributor: 
+class MyDistributor:
+    """
+    MyDistributor Class works as a main server (a load distrubutor) that uses the HashRing to
+    determine which MyKVStore instance should handle a given request and forwars the 
+    request accordingly.
+    """
     def __init__(self, ring, server_tracker, kv_stores):
         self.app = Flask(__name__)
         self.HashRing = ring
@@ -170,6 +207,7 @@ class MyDistributor:
         self.server_tracker = server_tracker
         self.kv_server_instances = kv_stores
 
+    # all routing methods
     def routes(self):
         @self.app.route('/put', methods=['PUT'])
         def put_value():
@@ -219,7 +257,6 @@ class MyDistributor:
             new_server_process.start()
             return jsonify({'message': "new server added to port"}), 200
 
-
         @self.app.route('/remove_server', methods=['POST'])
         def remove_server():
             port = request.args.get('port')
@@ -230,16 +267,15 @@ class MyDistributor:
                     server_to_remove = kv_server 
                     break
             
-            print("test1")
             if server_to_remove is None:
                 return jsonify({'message': f"something went wrong1, server at {port} doesn't exist"}), 400
+            
+            # the try/except blocks are for testing
             try:
                 self.HashRing.remove_node(str(port))
                 data_from_server =  server_to_remove.server_kv_store
                 example_key = next(iter(data_from_server))
-                print("example key =", example_key)
                 next_server_port = self.HashRing.get_node(example_key)
-                print("Next port =", next_server_port)
                 for kv_server in self.kv_server_instances:
                     if (int(kv_server.port) == int(next_server_port)):
                         next_server = kv_server 
@@ -248,7 +284,6 @@ class MyDistributor:
             except Exception as e:
                 print(f"Error removing a server node: {e}")
             
-            print("test2")
             try:
                 response = requests.post(f"http://127.0.0.1:{port}/shutdown")
                 if response.status_code == 200:
@@ -260,13 +295,15 @@ class MyDistributor:
                 print(f"Error shutting down server on port {server_to_remove}: {e}")
                 return jsonify({'message': f"something went wrong3"}), 400
                         
+                        
         self.app.add_url_rule('/put', view_func=put_value, methods=['PUT'])
         self.app.add_url_rule('/get', view_func=get_value, methods=['GET'])
         self.app.add_url_rule('/del', view_func=del_value, methods=['DEL'])
         self.app.add_url_rule('/add_server', view_func=add_server, methods=['POST'])
         self.app.add_url_rule('/remove_server', view_func=remove_server, methods=['POST'])
         
-   
+    
+    # run the main server and clean up newly added kv store servers after shutdowm
     def run_server(self):
         print("The distributor is running")
         self.routes()
@@ -274,13 +311,14 @@ class MyDistributor:
         for server in self.added_servers:
             server.join()
      
-
+# a function to create a new instance of kv store server
 def create_server(port):
     server_name = f'MyKVServer{port}'
     storage_name = f'storage{port}.json'
     kv_store = MyKVStore(server_name, storage_name, port)
     return kv_store
 
+# a function to run a server in a seperate process
 def start_server(kv_store):
     kv_store.routes()
     kv_store.run_server()
@@ -290,6 +328,7 @@ if __name__ == '__main__':
     nodes = [] 
     port_number_tracker = 1
     number_of_servers = 5
+    
     while port_number_tracker <= number_of_servers:
         nodes.append(f"500{port_number_tracker}")    
         port_number_tracker += 1    
@@ -301,7 +340,6 @@ if __name__ == '__main__':
     ]
         
     myDistributor = MyDistributor(ring, port_number_tracker, servers)
-
     servers_process.append(Process(target=myDistributor.run_server))
     
     # Start all servers
