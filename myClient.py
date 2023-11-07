@@ -13,11 +13,11 @@ import csv
 BASE_URL = "http://127.0.0.1:5000"
 
 HOST, PORT = '127.0.0.1', 5000
-NUM_REQUESTS = 10000  # Number of requests to send per client
-NUM_CLIENTS = 10     # Number of concurrent clients
+NUM_REQUESTS = 1000  # Number of requests to send per client
+NUM_CLIENTS = 10    # Number of concurrent clients
 READ_PERCENTAGE = 0.95  # Percent of Read
-ALL_METHODS = True  # Flag for testing all three methods from each client
-TEST_DISTRUBUTION = False   # Flag for testing two methods (read and write) from each client
+ALL_METHODS = False  # Flag for testing all three methods from each client
+TEST_DISTRUBUTION = True   # Flag for testing two methods (read and write) from each client
 
 TEST_ADD_OR_REMOVE = False # Flag for testing adding/removing server behavior with a benefit of Consistent hashing
 # Please change NUM_REQUESTS and NUM_CLIENTS to 1 to pervent chaostic behavior
@@ -99,7 +99,7 @@ def remove_server(port):
 
 # compute reasonable csv file name containing Latency/Throughput pairs  
 if (ALL_METHODS):
-    filename = f"Latency_over_Throughput_with_all_three_methods_{NUM_REQUESTS}.csv" 
+    filename = f"Latency_over_Throughput_with_all_three_methods_{NUM_CLIENTS}_clients.csv" 
 elif TEST_DISTRUBUTION:
     filename = "Latency_over_Throughput_with_read_and_write.csv" 
 else:
